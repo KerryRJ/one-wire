@@ -2,7 +2,30 @@
 
 use embedded_hal::delay::blocking::DelayUs;
 use embedded_hal::digital::blocking::{InputPin,OutputPin};
-use fugit::ExtU32; //{MicrosDurationU32, MillisDurationU32};
+use fugit::{
+    ExtU32,
+    Duration,
+    NanosDurationU32,
+}; //{MicrosDurationU32, MillisDurationU32};
+
+
+pub enum Speed {
+    Standard,
+    Overdrive,
+}
+
+struct Speeds {
+    A: NanosDurationU32,
+    B: NanosDurationU32,
+    C: NanosDurationU32,
+    D: NanosDurationU32,
+    E: NanosDurationU32,
+    F: NanosDurationU32,
+    G: NanosDurationU32,
+    H: NanosDurationU32,
+    I: NanosDurationU32,
+    J: NanosDurationU32,
+}
 
 #[repr(u8)]
 enum Command {
@@ -32,6 +55,8 @@ pub type OneWireResult<T, E> = Result<T, OneWireError<E>>;
 pub struct OneWire<P, D> {
     pin: P,
     delay: D,
+    speeds: Speeds,
+    parasite_mode: bool,
 }
 
 impl<P, D, E> OneWire<P, D>
@@ -40,11 +65,76 @@ where
     P: OutputPin<Error = E>,
     D: DelayUs<Error = E>,
 {
-    pub fn new(pin: P, delay: D) -> OneWireResult<OneWire<P, D>, E> {
-        let mut wire = OneWire { pin, delay };
+    pub fn new(pin: P, delay: D, speed: Speed, parasite_mode: bool) -> OneWireResult<OneWire<P, D>, E> {
+        let speeds = match speed {
+            Speed::Standard =>
+                Speeds {
+                    A: NanosDurationU32::nanos(6000),
+                    B: NanosDurationU32::nanos(64000),
+                    C: NanosDurationU32::nanos(60000),
+                    D: NanosDurationU32::nanos(10000),
+                    E: NanosDurationU32::nanos(9000),
+                    F: NanosDurationU32::nanos(55000),
+                    G: NanosDurationU32::nanos(0),
+                    H: NanosDurationU32::nanos(480000),
+                    I: NanosDurationU32::nanos(70000),
+                    J: NanosDurationU32::nanos(410000),
+                },
+            Speed::Overdrive =>
+                Speeds {
+                    A: NanosDurationU32::nanos(1000),
+                    B: NanosDurationU32::nanos(7500),
+                    C: NanosDurationU32::nanos(7500),
+                    D: NanosDurationU32::nanos(2500),
+                    E: NanosDurationU32::nanos(1000),
+                    F: NanosDurationU32::nanos(7000),
+                    G: NanosDurationU32::nanos(2500),
+                    H: NanosDurationU32::nanos(70000),
+                    I: NanosDurationU32::nanos(8500),
+                    J: NanosDurationU32::nanos(40000),
+                },
+        };
+        let mut wire = OneWire { pin, delay, speeds, parasite_mode };
         wire.release()?;
         Ok(wire)
     }
+
+    pub fn write_1_bit(&mut self) -> OneWireResult<(), E> {
+        self.set_low()?;
+        self.delay.delay_us(self.speeds.A)?;
+        self.release()?;
+        self.delay.delay_us(self.speeds.B)?;
+        Ok(())
+    }
+
+    pub fn write_0_bit(&mut self) -> OneWireResult<(), E> {
+        self.set_low()?;
+        self.delay.delay_us(self.speeds.C)?;
+        self.release()?;
+        self.delay.delay_us(self.speeds.D)?;
+        Ok(())
+    }
+
+    pub fn read_bit(&mut self) -> OneWireResult<bool, E> {
+        self.set_low()?;
+        self.delay.delay_us(self.speeds.A)?;
+        self.release()?;
+        self.delay.delay_us(self.speeds.E)?;
+        let bit = self.is_high()?;
+        self.delay.delay_us(self.speeds.F)?;
+        Ok(bit)
+    }
+
+    pub fn reset(&mut self) -> OneWireResult<bool, E> {
+        self.wait_for_high()?;
+        self.set_low()?;
+        self.delay.delay_us(self.speeds.H)?;
+        self.release()?;
+        self.delay.delay_us(self.speeds.I)?;
+        let devices_present = self.is_low()?;
+        self.delay.delay_us(self.speeds.J)?;
+        Ok(devices_present)
+    }    
 
     // pub fn delay_us(&mut self, duration: MicrosDurationU32) -> OneWireResult<(), E> {
     //     self.delay
@@ -85,38 +175,12 @@ where
     pub fn wait_for_high(&mut self) -> OneWireResult<(), E> {
         for _ in 0..125 {
             if self.is_high()? {
+                self.delay.delay_us(self.speeds.G)?;
                 return Ok(());
             }
-            let _ = match self.delay.delay_us(2) {
-                Ok(_) => (),
-                Err(_/*e*/) => {
-                    // debug!();    // TODO log the error
-                    ()
-                },
-            };
+            self.delay.delay_us(2)?;
         }
         Err(OneWireError::BusNotHigh)
-    }
-
-    pub fn reset(&mut self) -> OneWireResult<bool, E> {
-        self.wait_for_high()?;
-        self.set_low()?;
-        self.delay.delay_us(480)?;
-        self.release()?;
-        self.delay.delay_us(70)?;
-        let is_ROM_present = self.is_low()?;
-        self.delay.delay_us(410)?;
-        Ok(is_ROM_present)
-    }
-
-    pub fn read_bit(&mut self) -> OneWireResult<bool, E> {
-        self.set_low()?;
-        self.delay.delay_us(6)?;
-        self.release()?;
-        self.delay.delay_us(9)?;
-        let bit = self.is_high()?;
-        self.delay.delay_us(55)?;
-        Ok(bit)
     }
 
     pub fn write_bit(&mut self, bit: bool) -> OneWireResult<(), E> {
@@ -125,22 +189,6 @@ where
         } else {
             self.write_0_bit()
         }
-    }
-
-    pub fn write_0_bit(&mut self) -> OneWireResult<(), E> {
-        self.set_low()?;
-        self.delay.delay_us(60)?;
-        self.release()?;
-        self.delay.delay_us(10)?;
-        Ok(())
-    }
-
-    pub fn write_1_bit(&mut self) -> OneWireResult<(), E> {
-        self.set_low()?;
-        self.delay.delay_us(6)?;
-        self.release()?;
-        self.delay.delay_us(64)?;
-        Ok(())
     }
 
     pub fn write_byte(&mut self, value: u8) -> OneWireResult<(), E> {

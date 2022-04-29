@@ -3,8 +3,8 @@
 use embedded_hal::delay::blocking::DelayUs;
 use embedded_hal::digital::blocking::{InputPin,OutputPin};
 use fugit::{
-    ExtU32,
-    Duration,
+    // ExtU32,
+    // Duration,
     NanosDurationU32,
 }; //{MicrosDurationU32, MillisDurationU32};
 
@@ -14,6 +14,7 @@ pub enum Speed {
     Overdrive,
 }
 
+// #[allow(non_snake_case)]
 struct Speeds {
     A: NanosDurationU32,
     B: NanosDurationU32,
@@ -37,7 +38,7 @@ enum Command {
 }
 
 #[derive(Debug, Clone)]
-pub struct ROM {
+pub struct Rom {
     family: u8,
     serial_number: [u8; 6],
     crc: u8,
@@ -80,6 +81,7 @@ where
                     I: NanosDurationU32::nanos(70000),
                     J: NanosDurationU32::nanos(410000),
                 },
+            // TODO embedded-hal traits do not do nanos
             Speed::Overdrive =>
                 Speeds {
                     A: NanosDurationU32::nanos(1000),
@@ -98,41 +100,62 @@ where
         wire.release()?;
         Ok(wire)
     }
-
+    
     pub fn write_1_bit(&mut self) -> OneWireResult<(), E> {
         self.set_low()?;
-        self.delay.delay_us(self.speeds.A)?;
+        self.delay
+            .delay_us(self.speeds.A.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
         self.release()?;
-        self.delay.delay_us(self.speeds.B)?;
+        self.delay
+            .delay_us(self.speeds.B.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
         Ok(())
     }
 
     pub fn write_0_bit(&mut self) -> OneWireResult<(), E> {
         self.set_low()?;
-        self.delay.delay_us(self.speeds.C)?;
+        self.delay
+            .delay_us(self.speeds.C.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
         self.release()?;
-        self.delay.delay_us(self.speeds.D)?;
+        self.delay
+            .delay_us(self.speeds.D.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
+
         Ok(())
     }
 
     pub fn read_bit(&mut self) -> OneWireResult<bool, E> {
         self.set_low()?;
-        self.delay.delay_us(self.speeds.A)?;
+        self.delay
+            .delay_us(self.speeds.A.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
         self.release()?;
-        self.delay.delay_us(self.speeds.E)?;
+        self.delay
+            .delay_us(self.speeds.E.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
         let bit = self.is_high()?;
-        self.delay.delay_us(self.speeds.F)?;
+        self.delay
+            .delay_us(self.speeds.F.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
         Ok(bit)
     }
 
     pub fn reset(&mut self) -> OneWireResult<bool, E> {
         self.wait_for_high()?;
         self.set_low()?;
-        self.delay.delay_us(self.speeds.H)?;
+        self.delay
+            .delay_us(self.speeds.H.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
         self.release()?;
-        self.delay.delay_us(self.speeds.I)?;
+        self.delay
+            .delay_us(self.speeds.I.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
         let devices_present = self.is_low()?;
-        self.delay.delay_us(self.speeds.J)?;
+        self.delay
+            .delay_us(self.speeds.J.to_millis())
+            .map_err(|e| OneWireError::Delay(e))?;
         Ok(devices_present)
     }    
 
@@ -163,6 +186,13 @@ where
             .set_low()
             .map_err(|e| OneWireError::Pin(e))
     }
+    
+    fn disable_parasite_mode(&mut self) -> OneWireResult<(), E> {
+        self.pin
+            .set_high()
+            .map_err(|e| OneWireError::Pin(e))?;
+        self.set_low()
+    }	
 
     pub fn is_low(&self) -> OneWireResult<bool, E> {
         self.pin.is_low().map_err(|e| OneWireError::Pin(e))
@@ -175,10 +205,14 @@ where
     pub fn wait_for_high(&mut self) -> OneWireResult<(), E> {
         for _ in 0..125 {
             if self.is_high()? {
-                self.delay.delay_us(self.speeds.G)?;
+                self.delay
+                    .delay_us(self.speeds.G.to_millis())
+                    .map_err(|e| OneWireError::Delay(e))?;
                 return Ok(());
             }
-            self.delay.delay_us(2)?;
+            self.delay
+                .delay_us(2)
+                .map_err(|e| OneWireError::Delay(e))?;
         }
         Err(OneWireError::BusNotHigh)
     }
@@ -191,10 +225,13 @@ where
         }
     }
 
-    pub fn write_byte(&mut self, value: u8) -> OneWireResult<(), E> {
-        for i in 0..8 {
+    pub fn write_byte(&mut self, mut value: u8) -> OneWireResult<(), E> {
+        for _ in 0..8 {
             self.write_bit(value & 0x01 == 0x01)?;
             value >>= 1;
+        }
+        if !self.parasite_mode {
+            self.disable_parasite_mode()?;
         }
         Ok(())
     }
@@ -204,5 +241,101 @@ where
             self.write_byte(bytes[i])?;
         }
         Ok(())
+    }
+    
+    pub fn write_command(&mut self, command: Command) -> OneWireResult<(), E> {
+        self.write_byte(command as u8)
+    }
+    
+    fn search_rom(
+        &mut self,
+        search_state: Option<&SearchState>,
+        only_triggered_alarms: bool,
+        delay: &mut impl DelayUs,
+    ) -> OneWireResult<Option<(Rom, SearchState)>, E> {
+        if let Some(search_state) = search_state {
+            if search_state.discrepencies == 0 {
+                return Ok(None);
+            }
+        }
+        
+        if !self.reset()? {
+            return Ok(None);
+        }
+        
+        if only_triggered_alarms {
+            self.write_command(Command::AlarmSearch)?;
+        } else {
+            self.write_command(Command::SearchROM)?;
+            
+        }
+        
+        let mut last_discrepancy: u8 = 0;
+        let mut rom;
+        let mut discrepancies;
+        let continue_start_bit;
+        
+        
+    }
+    
+    pub fn get_rom_iterator<'a,'b>(&'a mut self, only_triggered_alarms: bool, delay: &'b mut D) -> RomIterator<'a, 'b, P, D>
+    where
+        D: DelayUs,
+    {
+        RomIterator {
+            wire: self,
+            delay,
+            state: None,
+            is_finished: false,
+            only_triggered_alarms,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SearchState {
+    rom: u64,
+    discrepencies: u64,
+    last_discrepancy_index: u8,
+}
+
+pub struct RomIterator<'a, 'b, P, D>
+{
+    wire: &'a mut OneWire<P, D>,
+    delay: &'b mut D,
+    state: Option<SearchState>,
+    is_finished: bool,
+    only_triggered_alarms: bool,
+}
+
+impl<'a, 'b, P, E, D> Iterator for RomIterator<'a, 'b, P, D>
+where
+    P: InputPin<Error = E>,
+    P: OutputPin<Error = E>,
+    D: DelayUs,
+{
+    type Item = OneWireResult<Rom, E>;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.is_finished {
+            return None;
+        }
+        let result = self.wire.search_rom(self.state.as_ref(), self.only_triggered_alarms, self.delay);
+        match result {
+            Ok(Some((rom, search_state))) => {
+                self.state = Some(search_state);
+                Some(Ok(rom))
+            }
+            Ok(None) => {
+                self.state = None;
+                self.is_finished = true;
+                None
+            }
+            Err(e) => {
+                self.state = None;
+                self.is_finished = true;
+                Some(Err(e))
+            }
+        }			
     }
 }
